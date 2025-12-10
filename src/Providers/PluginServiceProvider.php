@@ -121,7 +121,7 @@ class PluginServiceProvider extends ServiceProvider
     if (File::isFile(__DIR__ . '/../../config/plugin.php')) {
       $this->publishes([
         __DIR__ . '/../../config/plugin.php' =>  config_path('app-plugins.php'),
-      ], 'phone-auth-config');
+      ], 'laravel-plugin');
     }
   }
 }
