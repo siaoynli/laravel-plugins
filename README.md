@@ -393,6 +393,7 @@ class MyPlugin extends AbstractPlugin
     public function getDescription(): string { }
 
     // 可选的方法
+    public function loadConfig(): void;
     public function register(): void { }
     public function registerRoutes(): void { }
     public function publishAssets(): void { }

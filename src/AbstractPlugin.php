@@ -42,11 +42,19 @@ abstract class AbstractPlugin implements PluginInterface
         return dirname($reflection->getFileName());
     }
 
+
+
     /**
      * 加载配置文件
      */
     public function loadConfig(): void
     {
+
+        $this->config = config('plugins.' . str_replace('/', '-', $this->getPluginName()), []);
+        if (!empty($this->config)) {
+            $this->enabled = $this->config['enabled'] ?? true;
+            return;
+        }
         $configFile = $this->basePath . '/config/plugin.php';
 
         if (File::exists($configFile)) {
