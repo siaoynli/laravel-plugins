@@ -2,6 +2,7 @@
 
 namespace Siaoynli\Plugins\Providers;
 
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\ServiceProvider;
 use Siaoynli\Plugins\PluginManager;
 
