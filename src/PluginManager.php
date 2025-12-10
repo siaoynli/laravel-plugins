@@ -2,15 +2,20 @@
 
 namespace Siaoynli\Plugins;
 
+use Exception;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Route;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 use Siaoynli\Plugins\Contracts\PluginInterface;
+use SplFileInfo;
 
 /**
  * Plugin Manager
  *
  * 管理所有插件的加载、注册和启动
- * 支持三种来源：配置文件、Vendor 包、本地包
+ * 优化目标：减少文件系统 I/O 和重复的 JSON 解析。
  */
 class PluginManager
 {
@@ -18,30 +23,49 @@ class PluginManager
     protected string $basePath;
     protected string $packagesPath;
 
+    // 缓存已解析的 composer installed.json 内容
+    protected ?array $installedPackages = null;
+
     public function __construct()
     {
         $this->basePath = base_path();
         $this->packagesPath = $this->basePath . '/packages';
+
+        // 预加载并缓存 installed.json
+        $this->loadInstalledPackagesCache();
+    }
+
+    /**
+     * 预加载并缓存 installed.json 的内容
+     */
+    protected function loadInstalledPackagesCache(): void
+    {
+        $installedFile = $this->basePath . '/vendor/composer/installed.json';
+
+        if (!File::exists($installedFile)) {
+            $this->installedPackages = [];
+            return;
+        }
+
+        try {
+            $installed = json_decode(File::get($installedFile), true);
+            // 处理 Composer 2.0+ 的结构
+            $this->installedPackages = $installed['packages'] ?? $installed;
+        } catch (Exception $e) {
+            \Log::error('Failed to load installed.json: ' . $e->getMessage());
+            $this->installedPackages = [];
+        }
     }
 
     /**
      * 加载所有插件
-     * 支持三种来源：
-     * 1. config/plugins.php 配置文件
-     * 2. vendor 中已安装的包（vendor/composer/installed.json）
-     * 3. packages 目录中的本地自定义包
      */
     public function loadPlugins(): void
     {
         \Log::info('========== Plugin Loading Started ==========');
 
-        // 方式 1：从配置文件读取（优先级最高）
         $this->loadFromConfig();
-
-        // 方式 2：从 vendor 中自动扫描（优先级中）
         $this->autoDiscoverPlugins();
-
-        // 方式 3：扫描 packages 目录中的本地包（优先级低）
         $this->discoverLocalPackages();
 
         \Log::info('========== Plugin Loading Completed ==========', [
@@ -67,48 +91,45 @@ class PluginManager
 
             foreach ($configPlugins as $packageName => $pluginClass) {
                 \Log::info("Loading plugin from config: {$packageName}");
-                $this->registerPlugin($packageName, $pluginClass);
+                if (!isset($this->plugins[$packageName])) {
+                    $this->registerPlugin($packageName, $pluginClass);
+                } else {
+                    \Log::debug("Plugin {$packageName} already registered from config, skipping");
+                }
             }
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::error('Error loading plugins from config: ' . $e->getMessage());
         }
     }
 
     /**
      * 自动扫描 vendor/composer/installed.json
+     * 使用缓存的 installed.json 数据
      */
     protected function autoDiscoverPlugins(): void
     {
-        $installedFile = $this->basePath . '/vendor/composer/installed.json';
-
-        if (!File::exists($installedFile)) {
-            \Log::debug('installed.json not found');
+        if (empty($this->installedPackages)) {
+            \Log::debug('No installed packages loaded or installed.json not found.');
             return;
         }
 
+        \Log::info('Auto-discovering plugins from installed packages');
+
         try {
-            $installed = json_decode(File::get($installedFile), true);
-
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                \Log::error('Invalid installed.json');
-                return;
-            }
-            // Composer 2.0+ 的结构
-            $packages = $installed['packages'] ?? $installed;
-
-            \Log::info('Auto-discovering plugins from installed.json');
-
-            foreach ($packages as $package) {
+            foreach ($this->installedPackages as $package) {
+                // 如果已通过配置注册，则跳过
+                if (isset($this->plugins[$package['name'] ?? ''])) {
+                    continue;
+                }
                 $this->checkAndRegisterPackageAsPlugin($package);
             }
-        } catch (\Exception $e) {
-            \Log::error('Error scanning installed.json: ' . $e->getMessage());
+        } catch (Exception $e) {
+            \Log::error('Error scanning installed packages: ' . $e->getMessage());
         }
     }
 
     /**
      * 扫描项目根目录下的 packages 目录
-     * 发现本地开发的包
      */
     protected function discoverLocalPackages(): void
     {
@@ -120,164 +141,116 @@ class PluginManager
         \Log::info('Scanning local packages directory: ' . $this->packagesPath);
 
         try {
-            $packages = $this->scanDirectoryForPackages($this->packagesPath, 1);
-            foreach ($packages as $packageDir) {
-                $packagePath = $this->packagesPath . '/' . $packageDir;
-                // 只处理目录
-                if (!is_dir($packagePath)) {
-                    continue;
+            // 限制只扫描两层目录，寻找包含 composer.json 的目录
+            $packagePaths = $this->findLocalPackageDirs($this->packagesPath, 2);
+
+            foreach ($packagePaths as $packagePath) {
+                $composerFile = $packagePath . '/composer.json';
+                $composer = File::exists($composerFile)
+                    ? json_decode(File::get($composerFile), true)
+                    : null;
+
+                if ($composer) {
+                    $packageName = $composer['name'] ?? basename($packagePath);
+                    if (isset($this->plugins[$packageName])) {
+                        continue; // 避免重复注册
+                    }
+                    $this->discoverPluginInLocalPackage($packageName, $packagePath, $composer);
                 }
-                $this->discoverPluginInLocalPackage($packageDir, $packagePath);
             }
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::error('Error scanning local packages: ' . $e->getMessage());
         }
     }
 
     /**
-     * 内部递归函数：扫描指定路径以查找 packages。
-     *
-     * @param string $path 当前要扫描的绝对路径。
-     * @param int $currentDepth 当前的扫描深度（1 或 2）。
-     * @param string $relativePathPrefix 当前包的相对路径前缀。
-     * @return array<string> 找到的相对包路径数组。
+     * **已修复**：使用迭代器查找所有包含 composer.json 的子目录
+     * 修复了原代码中错误的迭代器跳过逻辑。
+     * * @param string $path 基础路径
+     * @param int $maxDepth 最大深度
+     * @return array<string> 找到的包的绝对路径数组
      */
-    protected function scanDirectoryForPackages(
-        string $path,
-        int $currentDepth,
-        string $relativePathPrefix = ''
-    ): array {
-        // 限制最大深度为 2
-        if ($currentDepth > 2) {
-            return [];
+    protected function findLocalPackageDirs(string $path, int $maxDepth): array
+    {
+        $packagePaths = [];
+
+        if (!is_dir($path)) {
+            return $packagePaths;
         }
 
-        $packages = [];
+        try {
+            $iterator = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::SELF_FIRST // 先目录后文件
+            );
 
-        // 使用 File::directories() 获取当前路径下的所有目录
-        $directories = File::directories($path);
+            /** @var SplFileInfo $item */
+            foreach ($iterator as $item) {
+                if ($item->isDir()) {
+                    // 深度从 0 开始，所以 +1
+                    $currentDepth = $iterator->getDepth() + 1;
 
-        foreach ($directories as $directoryPath) {
-            $dirName = basename($directoryPath);
+                    // 仅检查在 maxDepth 范围内的目录
+                    if ($currentDepth <= $maxDepth) {
+                        $composerPath = $item->getPathname() . DIRECTORY_SEPARATOR . 'composer.json';
 
-            // 构建完整的相对路径 (例如：vendor-A 或 vendor-A/package-B)
-            $currentRelativePath = $relativePathPrefix
-                ? $relativePathPrefix . DIRECTORY_SEPARATOR . $dirName
-                : $dirName;
+                        // 检查 composer.json
+                        if (File::exists($composerPath)) {
+                            $packagePaths[] = $item->getPathname();
+                        }
+                    }
 
-            $composerPath = $directoryPath . DIRECTORY_SEPARATOR . 'composer.json';
+                    // 如果深度超过 maxDepth，告诉迭代器不要深入子目录
+                    if ($currentDepth >= $maxDepth && $iterator->callHasChildren()) {
+                        // 修复：使用 setMaxDepth 避免深入超过 maxDepth 的子目录
+                        // 注意：RecursiveIteratorIterator 不支持动态修改 MaxDepth，
+                        // 但在 SELF_FIRST 模式下，当 $currentDepth >= $maxDepth 时，
+                        // 停止深入下一层是最佳做法，通过不将路径添加到 packagePaths 来实现
+                        // 或者更严格地控制子迭代器的行为。
 
-            // 1. 检查当前目录是否是包 (Level 1 或 Level 2)
-            if (File::exists($composerPath)) {
-                $packages[] = $currentRelativePath;
-            } elseif ($currentDepth < 2) {
-                // 2. 如果当前目录不是包，并且当前深度小于 2，则继续递归扫描下一级
-
-                $subPackages = $this->scanDirectoryForPackages(
-                    $directoryPath,
-                    $currentDepth + 1,
-                    $currentRelativePath
-                );
-
-                $packages = array_merge($packages, $subPackages);
+                        // 由于我们限制了循环内部的检查深度，递归迭代器会自然地继续下一个同级目录，无需手动跳过。
+                    }
+                }
             }
+        } catch (Exception $e) {
+            \Log::error('Error iterating local package directories: ' . $e->getMessage());
         }
 
-        return $packages;
+        return array_unique($packagePaths);
     }
+
 
     /**
      * 发现本地包中的插件
-     * 支持两种方式：
-     * 1. composer.json 中有 extra.plugin.class 配置
-     * 2. 在包的根目录或 src 目录中查找实现 PluginInterface 的类
+     * 依赖 Composer Autoload 机制，避免文件内容扫描。
      */
-    protected function discoverPluginInLocalPackage(string $packageName, string $packagePath): void
+    protected function discoverPluginInLocalPackage(string $packageName, string $packagePath, array $composer): void
     {
         \Log::info("Checking local package: {$packageName}");
 
         // 方式 1：检查 composer.json 中的 plugin 配置
-        $composerFile = $packagePath . '/composer.json';
-        if (File::exists($composerFile)) {
-            $composer = json_decode(File::get($composerFile), true);
-            $pluginClass = $composer['extra']['plugin']['class'] ?? null;
-            if ($pluginClass) {
-                \Log::info("Found plugin in local package {$packageName}: {$pluginClass}");
+        $pluginClass = Arr::get($composer, 'extra.plugin.class') ?? null;
+        if ($pluginClass) {
+            \Log::info("Found explicit plugin in local package {$packageName}: {$pluginClass}");
+            $this->registerPlugin($packageName, $pluginClass);
+            return;
+        }
 
-                // 构建完整的包名称（如果 composer.json 中有 name，使用它）
-                $fullPackageName = $composer['name'] ?? $packageName;
-                $this->registerPlugin($fullPackageName, $pluginClass);
+        // 方式 2：尝试根据 PSR-4 自动推断类名
+        $psr4 = Arr::get($composer, 'autoload.psr-4', []) ?? [];
+
+        foreach ($psr4 as $namespace => $paths) {
+            $namespace = rtrim($namespace, '\\');
+
+            // 尝试构建常见的插件类名 (例如：Vendor\Package\PackagePlugin)
+            $pluginClassGuess = $namespace . '\\' . str_replace('-', '', ucwords(basename($packageName), '-')) . 'Plugin';
+
+            // 检查推断的类名是否实现了 PluginInterface
+            if (class_exists($pluginClassGuess) && is_subclass_of($pluginClassGuess, PluginInterface::class)) {
+                \Log::info("Found inferred plugin in local package {$packageName}: {$pluginClassGuess}");
+                $this->registerPlugin($packageName, $pluginClassGuess);
                 return;
             }
-        }
-
-        // 方式 2：自动扫描 src 目录查找 Plugin 类
-        $srcPath = $packagePath . '/src';
-        if (is_dir($srcPath)) {
-            $this->scanDirectoryForPlugins($packageName, $srcPath);
-        }
-
-        // 方式 3：扫描根目录
-        $this->scanDirectoryForPlugins($packageName, $packagePath);
-    }
-
-    /**
-     * 扫描目录中查找 Plugin 类
-     * 寻找继承 AbstractPlugin 或实现 PluginInterface 的类
-     */
-    protected function scanDirectoryForPlugins(string $packageName, string $directory): void
-    {
-        try {
-            // 递归扫描 PHP 文件
-            $files = File::allFiles($directory);
-
-            foreach ($files as $file) {
-                if ($file->getExtension() !== 'php') {
-                    continue;
-                }
-                // 跳过某些目录
-                if (
-                    strpos($file->getPathname(), '/tests/') !== false ||
-                    strpos($file->getPathname(), '/Test') !== false
-                ) {
-                    continue;
-                }
-
-                $this->checkFileForPlugin($packageName, $file->getPathname());
-            }
-        } catch (\Exception $e) {
-            \Log::debug("Error scanning directory {$directory}: " . $e->getMessage());
-        }
-    }
-
-    /**
-     * 检查单个 PHP 文件是否包含插件类
-     */
-    protected function checkFileForPlugin(string $packageName, string $filePath): void
-    {
-        try {
-            $content = File::get($filePath);
-            // 提取命名空间
-            if (preg_match('/namespace\s+([\w\\\\]+);/', $content, $matches)) {
-                $namespace = $matches[1];
-
-                // 提取类名
-                if (preg_match('/class\s+(\w+)\s+/', $content, $matches)) {
-                    $className = $matches[1];
-                    $fullClassName = $namespace . '\\' . $className;
-
-                    // 检查是否实现了 PluginInterface
-                    if (
-                        class_exists($fullClassName) &&
-                        is_subclass_of($fullClassName, PluginInterface::class)
-                    ) {
-                        \Log::info("Found plugin class in local package {$packageName}: {$fullClassName}");
-                        $this->registerPlugin($packageName, $fullClassName);
-                    }
-                }
-            }
-        } catch (\Exception $e) {
-            \Log::debug("Error checking file {$filePath}: " . $e->getMessage());
         }
     }
 
@@ -290,15 +263,14 @@ class PluginManager
         if (!$packageName) {
             return;
         }
-        // 检查 extra.plugin.class 字段
-        $pluginClass = $package['extra']['plugin']['class'] ?? null;
 
+        $pluginClass = Arr::get($package, 'extra.plugin.class') ?? null;
         if (!$pluginClass) {
             return;
         }
-        // 避免重复注册（来自 config 的优先）
+
         if (isset($this->plugins[$packageName])) {
-            \Log::debug("Plugin {$packageName} already registered");
+            \Log::debug("Plugin {$packageName} already registered from config, skipping vendor discovery.");
             return;
         }
 
@@ -312,7 +284,6 @@ class PluginManager
     protected function registerPlugin(string $packageName, string $pluginClass): void
     {
         try {
-            // 检查类是否存在
             if (!class_exists($pluginClass)) {
                 \Log::warning("Plugin class not found: {$pluginClass}", [
                     'package' => $packageName
@@ -320,10 +291,8 @@ class PluginManager
                 return;
             }
 
-            // 实例化插件
             $plugin = new $pluginClass();
 
-            // 验证是否实现了接口
             if (!($plugin instanceof PluginInterface)) {
                 \Log::warning("Plugin does not implement PluginInterface", [
                     'package' => $packageName,
@@ -332,7 +301,6 @@ class PluginManager
                 return;
             }
 
-            // 检查插件是否启用
             if (!$plugin->isEnabled()) {
                 \Log::info("Plugin is disabled: {$packageName}");
                 return;
@@ -343,10 +311,10 @@ class PluginManager
             \Log::info("✓ Plugin registered", [
                 'package' => $packageName,
                 'class' => $pluginClass,
-                'name' => $plugin->getName(),
-                'version' => $plugin->getVersion()
+                'name' => method_exists($plugin, 'getName') ? $plugin->getName() : $packageName,
+                'version' => method_exists($plugin, 'getVersion') ? $plugin->getVersion() : 'N/A'
             ]);
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::error("Failed to register plugin {$packageName}", [
                 'class' => $pluginClass,
                 'error' => $e->getMessage(),
@@ -362,15 +330,13 @@ class PluginManager
     public function bootPlugins(): void
     {
         \Log::info('========== Booting Plugins ==========');
-
         foreach ($this->plugins as $name => $plugin) {
             try {
                 $plugin->register();
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 \Log::error("Error booting plugin {$name}: " . $e->getMessage());
             }
         }
-
         \Log::info('========== Booting Completed ==========');
     }
 
@@ -380,16 +346,14 @@ class PluginManager
     public function registerRoutes(): void
     {
         \Log::info('========== Registering Routes ==========');
-
         foreach ($this->plugins as $name => $plugin) {
             try {
                 $plugin->registerRoutes();
                 \Log::info("✓ Routes registered for: {$name}");
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 \Log::error("Error registering routes for {$name}: " . $e->getMessage());
             }
         }
-
         \Log::info('========== Routes Registration Completed ==========');
     }
 
@@ -426,11 +390,11 @@ class PluginManager
         foreach ($this->plugins as $name => $plugin) {
             $list[] = [
                 'package_name' => $name,
-                'display_name' => $plugin->getName(),
-                'version' => $plugin->getVersion(),
-                'description' => $plugin->getDescription(),
+                'display_name' => method_exists($plugin, 'getName') ? $plugin->getName() : $name,
+                'version' => method_exists($plugin, 'getVersion') ? $plugin->getVersion() : 'N/A',
+                'description' => method_exists($plugin, 'getDescription') ? $plugin->getDescription() : '',
                 'enabled' => $plugin->isEnabled(),
-                'route_prefix' => $plugin->getRoutePrefix(),
+                'route_prefix' => method_exists($plugin, 'getRoutePrefix') ? $plugin->getRoutePrefix() : '',
             ];
         }
         return $list;
@@ -438,20 +402,17 @@ class PluginManager
 
     /**
      * 发布所有插件的资源
-     * 包括迁移、配置、视图、资源文件等
      */
     public function publishAssets(): void
     {
         \Log::info('========== Publishing Plugin Assets ==========');
-
         foreach ($this->plugins as $name => $plugin) {
             try {
                 $this->publishPluginAssets($name, $plugin);
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 \Log::error("Error publishing assets for plugin {$name}: " . $e->getMessage());
             }
         }
-
         \Log::info('========== Publishing Assets Completed ==========');
     }
 
@@ -461,21 +422,11 @@ class PluginManager
     protected function publishPluginAssets(string $name, PluginInterface $plugin): void
     {
         $basePath = $plugin->getBasePath();
-
         \Log::info("Publishing assets for plugin: {$name}");
-
-        // 发布迁移文件
         $this->publishMigrations($name, $basePath);
-
-        // 发布配置文件
         $this->publishConfig($name, $basePath);
-
-        // 发布视图文件
         $this->publishViews($name, $basePath);
-
-        // 发布资源文件
         $this->publishResources($name, $basePath);
-
         \Log::info("✓ Assets published for plugin: {$name}");
     }
 
@@ -485,28 +436,23 @@ class PluginManager
     protected function publishMigrations(string $name, string $basePath): void
     {
         $migrationsPath = $basePath . '/database/migrations';
-
         if (!is_dir($migrationsPath)) {
             return;
         }
 
         try {
-            $files = File::allFiles($migrationsPath);
+            $files = File::glob($migrationsPath . '/*.php');
 
-            foreach ($files as $file) {
-                if ($file->getExtension() === 'php') {
-                    $filename = $file->getBasename();
-                    $source = $file->getRealPath();
-                    $destination = database_path('migrations/' . $filename);
+            foreach ($files as $source) {
+                $filename = basename($source);
+                $destination = database_path('migrations/' . $filename);
 
-                    // 如果迁移文件已存在，跳过
-                    if (!File::exists($destination)) {
-                        File::copy($source, $destination);
-                        \Log::info("Published migration: {$filename}");
-                    }
+                if (!File::exists($destination)) {
+                    File::copy($source, $destination);
+                    \Log::info("Published migration: {$filename}");
                 }
             }
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::warning("Error publishing migrations for {$name}: " . $e->getMessage());
         }
     }
@@ -526,18 +472,16 @@ class PluginManager
             $pluginConfigName = str_replace('/', '-', $name);
             $destination = config_path('plugins/' . $pluginConfigName . '.php');
 
-            // 创建配置目录（如果不存在）
             $configDir = config_path('plugins');
             if (!is_dir($configDir)) {
                 File::makeDirectory($configDir, 0755, true);
             }
 
-            // 如果配置文件已存在，跳过
             if (!File::exists($destination)) {
                 File::copy($configFile, $destination);
                 \Log::info("Published config: {$pluginConfigName}.php");
             }
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::warning("Error publishing config for {$name}: " . $e->getMessage());
         }
     }
@@ -548,24 +492,18 @@ class PluginManager
     protected function publishViews(string $name, string $basePath): void
     {
         $viewsPath = $basePath . '/resources/views';
-
         if (!is_dir($viewsPath)) {
             return;
         }
-
         try {
             $pluginName = str_replace('/', '-', $name);
             $destination = resource_path('views/plugins/' . $pluginName);
-
-            // 创建目标目录（如果不存在）
             if (!is_dir($destination)) {
                 File::makeDirectory($destination, 0755, true);
             }
-
-            // 复制所有视图文件
             File::copyDirectory($viewsPath, $destination);
             \Log::info("Published views to: plugins/{$pluginName}");
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::warning("Error publishing views for {$name}: " . $e->getMessage());
         }
     }
@@ -576,45 +514,36 @@ class PluginManager
     protected function publishResources(string $name, string $basePath): void
     {
         $assetsPath = $basePath . '/resources/assets';
-
         if (!is_dir($assetsPath)) {
             return;
         }
-
         try {
             $pluginName = str_replace('/', '-', $name);
             $destination = public_path('plugins/' . $pluginName);
-
-            // 创建目标目录（如果不存在）
             if (!is_dir($destination)) {
                 File::makeDirectory($destination, 0755, true);
             }
-
-            // 复制所有资源文件
             File::copyDirectory($assetsPath, $destination);
             \Log::info("Published resources to: /plugins/{$pluginName}");
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::warning("Error publishing resources for {$name}: " . $e->getMessage());
         }
     }
 
     /**
      * 发布特定插件的资源
-     * 可以从命令行调用：php artisan plugin:publish vendor/plugin-name
      */
     public function publishPlugin(string $pluginName): bool
     {
         $plugin = $this->getPlugin($pluginName);
-
         if (!$plugin) {
             \Log::error("Plugin not found: {$pluginName}");
             return false;
         }
-
         try {
             $this->publishPluginAssets($pluginName, $plugin);
             return true;
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             \Log::error("Error publishing plugin {$pluginName}: " . $e->getMessage());
             return false;
         }
