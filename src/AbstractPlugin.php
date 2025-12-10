@@ -9,7 +9,8 @@ use Siaoynli\Plugins\Contracts\PluginInterface;
 /**
  * Abstract Plugin Class
  *
- * 所有插件的基类，提供了插件的基本功能实现
+ * 所有插件的基类，提供了插件的基本功能实现。
+ * 优化目标：减少文件系统 I/O 和重复的 JSON 解析。
  */
 abstract class AbstractPlugin implements PluginInterface
 {
@@ -17,9 +18,22 @@ abstract class AbstractPlugin implements PluginInterface
     protected array $config = [];
     protected string $basePath;
 
+    // **优化点:** 缓存 composer.json 的内容
+    protected ?array $composer = null;
+    // **优化点:** 缓存插件名称
+    protected ?string $pluginName = null;
+    // **优化点:** 缓存插件命名空间
+    protected ?string $pluginNamespace = null;
+
     public function __construct()
     {
+        // 1. 路径解析只在构造函数中执行一次
         $this->basePath = $this->resolvePath();
+
+        // 2. 预加载 composer.json 并缓存
+        $this->loadComposerConfig();
+
+        // 3. 配置加载
         $this->loadConfig();
     }
 
@@ -42,21 +56,37 @@ abstract class AbstractPlugin implements PluginInterface
         return dirname($reflection->getFileName());
     }
 
+    /**
+     * **优化:** 缓存 composer.json 的内容，避免多次调用 I/O。
+     */
+    protected function loadComposerConfig(): void
+    {
+        $composerFile = $this->basePath . '/composer.json';
+        if (File::exists($composerFile)) {
+            $this->composer = json_decode(File::get($composerFile), true);
+        } else {
+            $this->composer = [];
+        }
+    }
 
 
     /**
-     * 加载配置文件
+     * 加载配置文件 (精简逻辑：优先使用应用配置，否则使用插件自带配置)
      */
     public function loadConfig(): void
     {
+        // 尝试加载主应用已缓存或覆盖的配置
+        $mainConfigKey = 'plugins.' . str_replace('/', '-', $this->getPluginName());
+        $appConfig = config($mainConfigKey, []);
 
-        $this->config = config('plugins.' . str_replace('/', '-', $this->getPluginName()), []);
-        if (!empty($this->config)) {
+        if (!empty($appConfig)) {
+            $this->config = $appConfig;
             $this->enabled = $this->config['enabled'] ?? true;
             return;
         }
-        $configFile = $this->basePath . '/config/plugin.php';
 
+        // 如果主应用没有配置，则加载插件自身的配置
+        $configFile = $this->basePath . '/config/plugin.php';
         if (File::exists($configFile)) {
             $this->config = require $configFile;
             $this->enabled = $this->config['enabled'] ?? true;
@@ -79,31 +109,32 @@ abstract class AbstractPlugin implements PluginInterface
     }
 
     /**
-     * 注册服务提供者
+     * 注册服务提供者 (优化: 使用 glob 简化文件查找)
      */
     protected function registerServiceProviders(): void
     {
-        $providersFile = $this->basePath . '/src/Providers';
+        $providersDir = $this->basePath . '/src/Providers';
 
-        if (!File::isDirectory($providersFile)) {
+        if (!File::isDirectory($providersDir)) {
             return;
         }
 
-        $files = File::files($providersFile);
+        // **优化点:** 使用 glob 匹配所有 php 文件，减少循环内的字符串处理和文件检查
+        $files = File::glob($providersDir . '/*.php');
         $namespace = $this->getPluginNamespace() . '\\Providers';
 
-        foreach ($files as $file) {
-            if ($file->getExtension() === 'php' && $file->getBasename() !== '.gitkeep') {
-                $class = $namespace . '\\' . $file->getBasename('.php');
-                if (class_exists($class)) {
-                    app()->register($class);
-                }
+        foreach ($files as $filePath) {
+            $fileName = basename($filePath, '.php');
+            $class = $namespace . '\\' . $fileName;
+
+            if (class_exists($class)) {
+                app()->register($class);
             }
         }
     }
 
     /**
-     * 默认路由注册方法
+     * 默认路由注册方法 (优化: 使用 glob 简化文件查找)
      */
     public function registerRoutes(): void
     {
@@ -113,21 +144,22 @@ abstract class AbstractPlugin implements PluginInterface
             return;
         }
 
-        // 循环遍历目录下的所有文件
-        $files = File::files($routesDir);
+        // **优化点:** 使用 glob 匹配所有 php 文件
+        $routeFiles = File::glob($routesDir . '/*.php');
+
+        // 确保路由前缀和中间件只计算一次
+        $prefix = $this->getRoutePrefix();
+        $middleware = $this->getMiddleware();
+
         Route::group(
             [
-                'prefix' => $this->getRoutePrefix(),
-                'middleware' => $this->getMiddleware(),
+                'prefix' => $prefix,
+                'middleware' => $middleware,
             ],
-            function () use ($files, $routesDir) {
-                foreach ($files as $file) {
-                    if ($file->getExtension() === 'php' && $file->getBasename() !== '.gitkeep') {
-                        $routesFile = $routesDir . '/' . $file->getBasename();
-                        if (File::exists($routesFile)) {
-                            require $routesFile;
-                        }
-                    }
+            function () use ($routeFiles) {
+                foreach ($routeFiles as $routesFile) {
+                    // 文件路径已确定存在，直接 require
+                    require $routesFile;
                 }
             }
         );
@@ -228,30 +260,36 @@ abstract class AbstractPlugin implements PluginInterface
     }
 
     /**
-     * 获取插件名称
+     * 获取插件名称 (优化: 缓存结果)
      */
     public function getPluginName(): string
     {
-        $composerFile = $this->basePath . '/composer.json';
-        if (File::exists($composerFile)) {
-            $composer = json_decode(File::get($composerFile), true);
-            return $composer['name'] ?? 'unknown';
+        if ($this->pluginName !== null) {
+            return $this->pluginName;
         }
-        return 'unknown';
+
+        // 直接使用已缓存的 $this->composer 属性
+        $name = $this->composer['name'] ?? 'unknown';
+        $this->pluginName = $name; // 缓存
+
+        return $name;
     }
 
     /**
-     * 获取插件命名空间
+     * 获取插件命名空间 (优化: 缓存结果)
      */
     public function getPluginNamespace(): string
     {
-        $composerFile = $this->basePath . '/composer.json';
-        if (File::exists($composerFile)) {
-            $composer = json_decode(File::get($composerFile), true);
-            $psr4 = $composer['autoload']['psr-4'] ?? [];
-            return key($psr4) ? rtrim(key($psr4), '\\') : 'Plugins';
+        if ($this->pluginNamespace !== null) {
+            return $this->pluginNamespace;
         }
-        return 'Plugins';
+
+        // 直接使用已缓存的 $this->composer 属性
+        $psr4 = $this->composer['autoload']['psr-4'] ?? [];
+        $namespace = key($psr4) ? rtrim(key($psr4), '\\') : 'Plugins';
+        $this->pluginNamespace = $namespace; // 缓存
+
+        return $namespace;
     }
 
     /**
