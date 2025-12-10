@@ -1,13 +1,13 @@
 <?php
 
-namespace App\Console\Commands;
+namespace Siaoynli\Plugins\Console\Commands;
 
 use Illuminate\Console\Command;
 use Siaoynli\Plugins\PluginManager;
 
 class PluginPublishCommand extends Command
 {
-  protected $signature = 'app:plugin-publish {plugin? : 插件包名称（可选，留空则发布所有）}';
+  protected $signature = 'plugin:publish {plugin? : 插件包名称（可选，留空则发布所有）}';
 
   protected $description = '发布插件的资源（迁移、配置、视图、静态资源等）';
 

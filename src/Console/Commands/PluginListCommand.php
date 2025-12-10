@@ -1,13 +1,13 @@
 <?php
 
-namespace App\Console\Commands;
+namespace Siaoynli\Plugins\Console\Commands;
 
 use Illuminate\Console\Command;
 use Siaoynli\Plugins\PluginManager;
 
 class PluginListCommand extends Command
 {
-  protected $signature = 'app:plugin-list';
+  protected $signature = 'plugin:list';
   protected $description = 'List all loaded plugins';
 
   public function handle()
