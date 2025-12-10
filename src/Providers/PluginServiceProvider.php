@@ -88,6 +88,8 @@ class PluginServiceProvider extends ServiceProvider
       ]);
     }
 
+    $this->publishConfig();
+
     \Log::info('========== PluginServiceProvider::boot() Completed ==========');
   }
 
@@ -106,6 +108,19 @@ class PluginServiceProvider extends ServiceProvider
       ]);
 
       \Log::debug('Plugin commands registered successfully');
+    }
+  }
+
+
+  /**
+   * 发布配置
+   */
+  protected function publishConfig(): void
+  {
+    if (File::isFile(__DIR__ . '/../../config/plugin.php')) {
+      $this->publishes([
+        __DIR__ . '/../../config/plugin.php' =>  config_path('app-plugins.php'),
+      ], 'phone-auth-config');
     }
   }
 }
