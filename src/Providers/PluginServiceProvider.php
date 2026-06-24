@@ -130,8 +130,17 @@ class PluginServiceProvider extends ServiceProvider
         }
 
         // 5. 声明式注册可发布资源（不拷贝文件）
+        //    PluginPublisher 收集路径，由 ServiceProvider 自身调用 protected publishes() / loadViewsFrom()
         foreach ($registry->all() as $plugin) {
-            $publisher->register($this, $plugin);
+            $result = $publisher->register($this, $plugin);
+
+            foreach ($result['publishes'] as $group => $paths) {
+                $this->publishes($paths, $group);
+            }
+
+            foreach ($result['views'] as $namespace => $path) {
+                $this->loadViewsFrom($path, $namespace);
+            }
         }
 
         \Log::debug('Plugin system booted', ['count' => $registry->count()]);
