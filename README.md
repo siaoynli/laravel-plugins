@@ -383,17 +383,30 @@ return [
 
 ### 插件级配置
 
-每个插件可在自身目录的 `config/plugin.php` 中配置：
+插件的配置统一通过 `config/plugins/{slug-name}.php` 管理（`{slug-name}` 为包名中 `/` 替换为 `-`）。
+
+**获取配置文件**：通过 `vendor:publish` 发布插件配置：
+
+```bash
+php artisan vendor:publish --tag=my-vendor-my-plugin-config
+```
+
+这会将插件自带的 `config/plugin.php` 复制到 `config/plugins/my-vendor-my-plugin.php`。
+
+**编辑配置**：
 
 ```php
+// config/plugins/my-vendor-my-plugin.php
 return [
     'enabled' => true,               // 是否启用
     'route_prefix' => 'my-plugin',   // 路由前缀
     'middleware' => ['api'],          // 路由中间件
+
+    // 插件自定义的其他配置项...
 ];
 ```
 
-应用级配置（`config/plugins/{slug-name}.php`）会覆盖插件默认配置中同名的键。
+**配置优先级**：`config/plugins/{slug-name}.php`（应用级） > 插件自带 `config/plugin.php`（默认值）。`register()` 阶段会自动将两者合并，应用级配置覆盖同名键。
 
 ## 🔧 API 参考
 
@@ -521,23 +534,33 @@ php artisan plugin:clear
 
 ### Q: 如何禁用某个插件？
 
-在插件的 `config/plugin.php` 或应用级配置 `config/plugins/{slug-name}.php` 中设置：
+在 `config/plugins/{slug-name}.php` 中设置 `enabled` 为 `false`：
 
 ```php
+// config/plugins/siaoynli-phone-auth-plugin.php
 return [
     'enabled' => false,
 ];
 ```
 
+如果该文件不存在，先发布配置：
+
+```bash
+php artisan vendor:publish --tag=siaoynli-phone-auth-plugin-config
+```
+```
+
 ### Q: 如何自定义路由前缀和中间件？
 
-在插件的 `config/plugin.php` 中配置：
+在 `config/plugins/{slug-name}.php` 中配置：
 
 ```php
+// config/plugins/my-vendor-my-plugin.php
 return [
     'route_prefix' => 'custom-prefix',
     'middleware' => ['api', 'auth:api'],
 ];
+```
 ```
 
 ### Q: 插件未被加载怎么办？
