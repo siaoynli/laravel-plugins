@@ -292,10 +292,10 @@ abstract class AbstractPlugin implements PluginInterface
 
         $slugName = str_replace('/', '-', $this->getName());
         $pluginDefaults = require $configFile;
-        $appConfig = config($slugName, []);
+        $appConfig = config("plugins.{$slugName}", []);
 
         // 应用配置优先（与 Laravel 的 mergeConfigFrom 一致）
-        config([$slugName => array_merge($pluginDefaults, $appConfig)]);
+        config(["plugins.{$slugName}" => array_merge($pluginDefaults, $appConfig)]);
     }
 
     /**
