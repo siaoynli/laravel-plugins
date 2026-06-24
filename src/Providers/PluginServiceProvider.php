@@ -4,124 +4,167 @@ namespace Siaoynli\Plugins\Providers;
 
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\ServiceProvider;
+use Siaoynli\Plugins\Contracts\PluginInterface;
+use Siaoynli\Plugins\Discovery\PluginDiscovery;
+use Siaoynli\Plugins\Events\PluginBooted;
+use Siaoynli\Plugins\Events\PluginRegistered;
+use Siaoynli\Plugins\PluginManifest;
 use Siaoynli\Plugins\PluginManager;
+use Siaoynli\Plugins\Publisher\PluginPublisher;
+use Siaoynli\Plugins\Registry\PluginRegistry;
 
 /**
  * Plugin Service Provider
  *
- * 用于注册和启动插件系统
+ * 插件系统的 Laravel 入口。
+ *
+ * 生命周期：
+ * - register(): 绑定单例 + 合并自身配置
+ * - boot(): 发现插件 → 注册(register) → 启动(boot) → 路由 → 发布注册 → 命令
  */
 class PluginServiceProvider extends ServiceProvider
 {
-  /**
-   * 注册服务
-   * 这里只注册单例，不要加载插件
-   */
-  public function register(): void
-  {
-    \Log::debug('========== PluginServiceProvider::register() ==========');
+    /**
+     * 注册服务 — 仅绑定容器，不加载插件
+     */
+    public function register(): void
+    {
+        // 合并本包自身的配置
+        $this->mergeConfigFrom(__DIR__ . '/../../config/plugin.php', 'plugins');
 
-    try {
-      // 注册插件管理器为单例，但不在这里加载插件
-      $this->app->singleton(PluginManager::class, function ($app) {
-        \Log::debug('Creating PluginManager singleton');
-        return new PluginManager();
-      });
+        // 绑定单例
+        $this->app->singleton(PluginManifest::class, function ($app) {
+            $path = config('plugins.cache.path', $app->bootstrapPath('cache/plugins.php'));
+            return new PluginManifest($path);
+        });
 
-      // 也可以使用短名称访问
-      $this->app->alias(PluginManager::class, 'plugin-manager');
+        $this->app->singleton(PluginDiscovery::class);
+        $this->app->singleton(PluginRegistry::class);
+        $this->app->singleton(PluginPublisher::class);
 
-      \Log::debug('PluginManager singleton registered');
-    } catch (\Exception $e) {
-      \Log::error('Error in PluginServiceProvider::register(): ' . $e->getMessage(), [
-        'file' => $e->getFile(),
-        'line' => $e->getLine()
-      ]);
+        // 向后兼容：PluginManager 作为 Registry 的门面
+        $this->app->singleton(PluginManager::class, function ($app) {
+            return new PluginManager($app->make(PluginRegistry::class));
+        });
+        $this->app->alias(PluginManager::class, 'plugin-manager');
     }
-  }
 
-  /**
-   * 启动服务
-   * 在这里加载和启动插件
-   */
-  public function boot(): void
-  {
-    \Log::debug('========== PluginServiceProvider::boot() ==========');
-
-    try {
-      $manager = $this->app->make(PluginManager::class);
-
-      // 加载插件 - 在 boot 阶段，autoloader 已经完全初始化
-      \Log::debug('Loading plugins...');
-      $manager->loadPlugins();
-
-      $pluginCount = count($manager->getPlugins());
-      \Log::debug("Loaded {$pluginCount} plugins");
-
-      // 启动所有插件
-      \Log::debug('Booting plugins...');
-      $manager->bootPlugins();
-
-      // 注册路由
-      \Log::debug('Registering plugin routes...');
-      $manager->registerRoutes();
-
-      \Log::debug('All plugin routes registered');
-
-      // 注册 Artisan 命令 - 不需要发布，直接生效
-      $this->registerCommands();
-
-      // 发布资源 - 只在运行 console 命令时
-      if ($this->app->runningInConsole()) {
-        try {
-          \Log::debug('Publishing plugin assets...');
-          $manager->publishAssets();
-          \Log::debug('Plugin assets published');
-        } catch (\Exception $e) {
-          \Log::warning('Error publishing assets: ' . $e->getMessage());
+    /**
+     * 启动服务 — 按正确时序加载插件
+     */
+    public function boot(): void
+    {
+        // 检查插件系统是否启用
+        if (!config('plugins.enabled', true)) {
+            return;
         }
-      }
-    } catch (\Exception $e) {
-      \Log::error('Error in PluginServiceProvider::boot(): ' . $e->getMessage(), [
-        'file' => $e->getFile(),
-        'line' => $e->getLine(),
-        'trace' => $e->getTraceAsString()
-      ]);
+
+        try {
+            $this->bootPlugins();
+        } catch (\Exception $e) {
+            \Log::error('Plugin system boot failed: ' . $e->getMessage(), [
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+        }
+
+        // 注册命令（始终注册，即使插件系统禁用）
+        $this->registerCommands();
+
+        // 注册配置文件发布
+        $this->publishConfig();
     }
 
-    $this->publishConfig();
+    /**
+     * 启动插件系统
+     */
+    protected function bootPlugins(): void
+    {
+        $discovery = $this->app->make(PluginDiscovery::class);
+        $registry = $this->app->make(PluginRegistry::class);
+        $publisher = $this->app->make(PluginPublisher::class);
+        $manifest = $this->app->make(PluginManifest::class);
 
-    \Log::debug('========== PluginServiceProvider::boot() Completed ==========');
-  }
+        // 1. 发现插件（有缓存则跳过扫描）
+        $pluginData = $discovery->discover($manifest);
 
-  /**
-   * 注册 Artisan 命令
-   * 命令不需要发布，直接生效
-   */
-  protected function registerCommands(): void
-  {
-    if ($this->app->runningInConsole()) {
-      // 直接注册插件相关的 Artisan 命令
-      // 这些命令会被自动加载，不需要 vendor:publish
-      $this->commands([
-        \Siaoynli\Plugins\Console\Commands\PluginListCommand::class,
-        \Siaoynli\Plugins\Console\Commands\PluginPublishCommand::class,
-      ]);
+        // 2. 实例化并注册到 Registry
+        foreach ($pluginData as $packageName => $data) {
+            $pluginClass = $data['class'] ?? null;
 
-      \Log::debug('Plugin commands registered successfully');
+            if (!$pluginClass || !class_exists($pluginClass)) {
+                \Log::warning("Plugin class not found: {$pluginClass} ({$packageName})");
+                continue;
+            }
+
+            /** @var PluginInterface $plugin */
+            $plugin = new $pluginClass();
+
+            if (!$plugin->isEnabled()) {
+                \Log::debug("Plugin disabled, skipping: {$packageName}");
+                continue;
+            }
+
+            $registry->register($packageName, $plugin);
+            event(new PluginRegistered($plugin));
+        }
+
+        // 3. 调用 register()（服务绑定阶段）
+        foreach ($registry->all() as $name => $plugin) {
+            try {
+                $plugin->register();
+            } catch (\Exception $e) {
+                \Log::error("Error in plugin register(): {$name} - " . $e->getMessage());
+            }
+        }
+
+        // 4. 调用 boot() + registerRoutes()（启动阶段）
+        foreach ($registry->all() as $name => $plugin) {
+            try {
+                $plugin->boot();
+                $plugin->registerRoutes();
+                event(new PluginBooted($plugin));
+            } catch (\Exception $e) {
+                \Log::error("Error in plugin boot(): {$name} - " . $e->getMessage());
+            }
+        }
+
+        // 5. 声明式注册可发布资源（不拷贝文件）
+        foreach ($registry->all() as $plugin) {
+            $publisher->register($this, $plugin);
+        }
+
+        \Log::debug('Plugin system booted', ['count' => $registry->count()]);
     }
-  }
 
+    /**
+     * 注册 Artisan 命令
+     */
+    protected function registerCommands(): void
+    {
+        if (!$this->app->runningInConsole()) {
+            return;
+        }
 
-  /**
-   * 发布配置
-   */
-  protected function publishConfig(): void
-  {
-    if (File::isFile(__DIR__ . '/../../config/plugin.php')) {
-      $this->publishes([
-        __DIR__ . '/../../config/plugin.php' =>  config_path('app-plugins.php'),
-      ], 'laravel-plugin');
+        $this->commands([
+            \Siaoynli\Plugins\Console\Commands\PluginListCommand::class,
+            \Siaoynli\Plugins\Console\Commands\PluginPublishCommand::class,
+            \Siaoynli\Plugins\Console\Commands\PluginCacheCommand::class,
+            \Siaoynli\Plugins\Console\Commands\PluginClearCommand::class,
+        ]);
     }
-  }
+
+    /**
+     * 发布本包的配置文件
+     */
+    protected function publishConfig(): void
+    {
+        $configPath = __DIR__ . '/../../config/plugin.php';
+
+        if (File::isFile($configPath)) {
+            $this->publishes([
+                $configPath => config_path('plugins.php'),
+            ], 'laravel-plugins-config');
+        }
+    }
 }

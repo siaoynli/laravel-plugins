@@ -13,56 +13,82 @@
 ```bash
 composer install              # 安装依赖
 composer dump-autoload        # 刷新自动加载
-# 无测试目录，暂无测试命令
+php artisan plugin:cache      # 构建 manifest 缓存
+php artisan plugin:clear      # 清除 manifest 缓存
+php artisan plugin:list       # 列出已加载插件
+php artisan plugin:publish    # 查看可发布资源标签
 ```
 
 ## 架构
 
 ```
 PluginServiceProvider (Laravel 入口)
-  ├── register(): 绑定 PluginManager 单例
-  └── boot(): loadPlugins() → bootPlugins() → registerRoutes() → publishAssets()
+  ├── register(): 绑定单例 (Manifest, Discovery, Registry, Publisher, Manager)
+  └── boot(): discover → register → boot → routes → publishes → commands
 
-PluginManager (核心调度器，单例)
-  ├── loadFromConfig()        — 阶段1：读取 config/app-plugins.php（最高优先级）
-  ├── autoDiscoverPlugins()   — 阶段2：扫描 vendor/composer/installed.json
-  └── discoverLocalPackages() — 阶段3：递归扫描 packages/ 目录
+PluginManifest (缓存层)
+  └── bootstrap/cache/plugins.php — 生产环境零扫描
 
-AbstractPlugin (插件基类，实现 PluginInterface)
-  ├── resolvePath()           — 查找插件根目录（向上查找 composer.json）
-  ├── register()              — 合并配置 + 自动发现 Providers
-  ├── registerRoutes()        — 加载 routes/*.php 并包裹 Route::group
-  └── publishAssets()         — 直接拷贝迁移/配置/视图/资源文件
+PluginDiscovery (发现)
+  ├── fromConfig()        — config/plugins.php → plugins 数组
+  ├── fromVendor()        — installed.json → extra.plugin.class
+  └── fromLocalPackages() — 扫描 packages/ 目录
 
-PluginInterface (契约，16 个方法)
+PluginRegistry (注册表)
+  └── 管理已注册插件实例的增删查
+
+PluginPublisher (发布器)
+  └── 声明式 publishes() 注册，用户通过 vendor:publish 手动发布
+
+AbstractPlugin (插件基类)
+  ├── 延迟加载：构造函数零 I/O，属性按需初始化
+  ├── register() — 配置合并 + 服务提供者注册
+  ├── boot()     — 子类覆写（事件、中间件等）
+  └── registerRoutes() — 尊重 routesAreCached()
+
+PluginInterface (精简契约：7 个核心方法)
+
+PluginManager (向后兼容门面，代理到 PluginRegistry)
+
+Events: PluginRegistered / PluginBooted
 ```
 
 ## 目录结构
 
 ```
 src/
-├── Contracts/PluginInterface.php     # 插件契约
-├── Providers/PluginServiceProvider.php # Laravel 服务提供者
+├── Contracts/PluginInterface.php       # 精简契约（7 方法）
+├── Discovery/PluginDiscovery.php       # 插件发现（三阶段扫描）
+├── Registry/PluginRegistry.php         # 插件注册表
+├── Publisher/PluginPublisher.php       # 声明式资源发布
+├── Events/
+│   ├── PluginRegistered.php            # 注册事件
+│   └── PluginBooted.php               # 启动事件
 ├── Console/Commands/
-│   ├── PluginListCommand.php         # plugin:list
-│   └── PluginPublishCommand.php      # plugin:publish {plugin?}
-├── AbstractPlugin.php                # 插件抽象基类
-└── PluginManager.php                 # 核心管理器
+│   ├── PluginListCommand.php           # plugin:list
+│   ├── PluginPublishCommand.php        # plugin:publish
+│   ├── PluginCacheCommand.php          # plugin:cache
+│   └── PluginClearCommand.php          # plugin:clear
+├── Providers/PluginServiceProvider.php # Laravel 服务提供者
+├── AbstractPlugin.php                  # 插件抽象基类
+├── PluginManifest.php                  # Manifest 缓存
+└── PluginManager.php                   # 向后兼容门面
 config/
-└── plugin.php                        # 默认配置（发布为 app-plugins.php）
+└── plugin.php                          # 配置（发现、缓存、手动注册）
 ```
 
 ## 编码规范
 
 - **提交格式**: Conventional Commits（`feat()`, `perf()`, `refactor()` 等），允许中文前缀
 - **注释/文档**: 中文
-- **日志**: 大量使用 `\Log::info/warning/error/debug()`，带分隔标记
+- **日志**: `error`/`warning` 用于真实异常，`debug` 用于流程追踪
 - **错误处理**: try-catch + 日志记录，不轻易 re-throw
-- **性能**: 关键数据已缓存（composer.json、插件名、命名空间、installed.json）
+- **性能**: Manifest 缓存 + 延迟加载，生产环境零文件扫描
 
-## 注意事项
+## 关键设计决策
 
-- CLI 模式下 `boot()` 会自动执行 `publishAssets()`（每次 artisan 命令都会拷贝文件）
-- `plugin:publish` 命令不支持 README 中提到的 `--force` / `-v` 参数
-- 无测试目录（`tests/`），PHPUnit 配置了但未使用
-- 插件间无依赖解析机制（路线图中计划实现）
+- **Manifest 缓存**: 插件发现结果写入 `bootstrap/cache/plugins.php`，生产环境直接 require
+- **声明式发布**: 使用 Laravel 原生 `publishes()` 注册，不在 boot 时自动拷贝文件
+- **生命周期分离**: `register()` 仅绑定容器，`boot()` 处理路由/事件
+- **路由缓存兼容**: `registerRoutes()` 检查 `routesAreCached()` 后跳过
+- **向后兼容**: `PluginManager` 保留为 Registry 的门面，`plugin-manager` alias 保留

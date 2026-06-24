@@ -3,142 +3,79 @@
 namespace Siaoynli\Plugins\Console\Commands;
 
 use Illuminate\Console\Command;
-use Siaoynli\Plugins\PluginManager;
+use Siaoynli\Plugins\Registry\PluginRegistry;
 
 class PluginPublishCommand extends Command
 {
-  protected $signature = 'plugin:publish {plugin? : 插件包名称（可选，留空则发布所有）}';
+    protected $signature = 'plugin:publish {plugin? : 插件包名（可选，留空则提示使用 vendor:publish）}';
+    protected $description = '提示使用 vendor:publish 发布插件资源';
 
-  protected $description = '发布插件的资源（迁移、配置、视图、静态资源等）';
+    public function handle(): int
+    {
+        $registry = $this->laravel->make(PluginRegistry::class);
 
-  public function handle()
-  {
-    $this->line('');
-    $this->info('╔════════════════════════════════════════╗');
-    $this->info('║   Plugin Asset Publishing Command      ║');
-    $this->info('╚════════════════════════════════════════╝');
-    $this->line('');
-
-    try {
-      $manager = app(PluginManager::class);
-      $pluginName = $this->argument('plugin');
-
-      if (empty($manager->getPlugins())) {
-        $this->warn('⚠️  No plugins loaded. Please check your plugin configuration.');
-        return Command::FAILURE;
-      }
-
-      if ($pluginName) {
-        return $this->publishSinglePlugin($manager, $pluginName);
-      } else {
-        return $this->publishAllPlugins($manager);
-      }
-    } catch (\Exception $e) {
-      $this->newLine();
-      $this->error('❌ Error: ' . $e->getMessage());
-      if ($this->getOutput()->isVerbose()) {
-        $this->error('File: ' . $e->getFile() . ':' . $e->getLine());
-        $this->error('Trace: ' . $e->getTraceAsString());
-      }
-      return Command::FAILURE;
-    }
-  }
-
-  /**
-   * 发布单个插件的资源
-   */
-  protected function publishSinglePlugin(PluginManager $manager, string $pluginName): int
-  {
-    $plugin = $manager->getPlugin($pluginName);
-
-    if (!$plugin) {
-      $this->newLine();
-      $this->error("❌ Plugin not found: {$pluginName}");
-      $this->line('');
-      $this->info('Available plugins:');
-      $this->listAvailablePlugins($manager);
-      return Command::FAILURE;
-    }
-
-    $this->info("Publishing plugin: {$pluginName}");
-    $this->newLine();
-
-    if ($manager->publishPlugin($pluginName)) {
-      $this->newLine();
-      $this->info("✅ Plugin '{$pluginName}' assets published successfully");
-      $this->line('');
-      return Command::SUCCESS;
-    } else {
-      $this->newLine();
-      $this->error("❌ Failed to publish plugin: {$pluginName}");
-      return Command::FAILURE;
-    }
-  }
-
-  /**
-   * 发布所有插件的资源
-   */
-  protected function publishAllPlugins(PluginManager $manager): int
-  {
-    $plugins = $manager->getPlugins();
-    $count = count($plugins);
-
-    $this->info("Publishing assets for {$count} plugin(s)...");
-    $this->newLine();
-
-    $progressBar = $this->output->createProgressBar($count);
-    $progressBar->setFormat(
-      "%message%\n %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s%"
-    );
-    $progressBar->setMessage('Initializing...');
-    $progressBar->start();
-
-    foreach ($plugins as $name => $plugin) {
-      $progressBar->setMessage("Publishing: {$name}");
-
-      try {
-        $manager->publishPlugin($name);
-      } catch (\Exception $e) {
-        if ($this->getOutput()->isVerbose()) {
-          $progressBar->clear();
-          $this->warn("  ⚠️  Error publishing {$name}: " . $e->getMessage());
-          $progressBar->display();
+        if ($registry->count() === 0) {
+            $this->warn('No plugins loaded.');
+            return Command::FAILURE;
         }
-      }
 
-      $progressBar->advance();
+        $pluginName = $this->argument('plugin');
+
+        if ($pluginName) {
+            return $this->showPluginTags($registry, $pluginName);
+        }
+
+        return $this->showAllTags($registry);
     }
 
-    $progressBar->finish();
-    $this->newLine(2);
+    /**
+     * 显示指定插件的可用发布标签
+     */
+    protected function showPluginTags(PluginRegistry $registry, string $pluginName): int
+    {
+        $plugin = $registry->get($pluginName);
 
-    $this->info("✅ All plugins published successfully");
-    $this->line('');
+        if (!$plugin) {
+            $this->error("Plugin not found: {$pluginName}");
+            $this->line('');
+            $this->showAllTags($registry);
+            return Command::FAILURE;
+        }
 
-    return Command::SUCCESS;
-  }
+        $tag = str_replace('/', '-', $pluginName);
 
-  /**
-   * 列出可用的插件
-   */
-  protected function listAvailablePlugins(PluginManager $manager): void
-  {
-    $plugins = $manager->listPlugins();
+        $this->info("Publishable resources for: {$pluginName}");
+        $this->line('');
+        $this->line("  php artisan vendor:publish --tag={$tag}-config");
+        $this->line("  php artisan vendor:publish --tag={$tag}-migrations");
+        $this->line("  php artisan vendor:publish --tag={$tag}-views");
+        $this->line("  php artisan vendor:publish --tag={$tag}-assets");
+        $this->line('');
+        $this->line("  php artisan vendor:publish --tag={$tag}-config --tag={$tag}-migrations  (多个标签)");
 
-    if (empty($plugins)) {
-      $this->warn('  No plugins available');
-      return;
+        return Command::SUCCESS;
     }
 
-    $headers = ['Package', 'Version', 'Enabled'];
-    $rows = array_map(function ($plugin) {
-      return [
-        $plugin['package_name'],
-        $plugin['version'],
-        $plugin['enabled'] ? '✓' : '✗',
-      ];
-    }, $plugins);
+    /**
+     * 显示所有插件的发布标签
+     */
+    protected function showAllTags(PluginRegistry $registry): int
+    {
+        $this->info('Use vendor:publish to publish plugin resources:');
+        $this->line('');
 
-    $this->table($headers, $rows);
-  }
+        foreach ($registry->all() as $name => $plugin) {
+            $tag = str_replace('/', '-', $name);
+            $this->line("  <info>{$name}</info>");
+            $this->line("    vendor:publish --tag={$tag}-config");
+            $this->line("    vendor:publish --tag={$tag}-migrations");
+            $this->line("    vendor:publish --tag={$tag}-views");
+            $this->line("    vendor:publish --tag={$tag}-assets");
+            $this->line('');
+        }
+
+        $this->line('  Publish all: vendor:publish --provider="Siaoynli\\\\Plugins\\\\Providers\\\\PluginServiceProvider"');
+
+        return Command::SUCCESS;
+    }
 }
