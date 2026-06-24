@@ -62,13 +62,13 @@ class PluginManager
      */
     public function loadPlugins(): void
     {
-        \Log::info('========== Plugin Loading Started ==========');
+        \Log::debug('========== Plugin Loading Started ==========');
 
         $this->loadFromConfig();
         $this->autoDiscoverPlugins();
         $this->discoverLocalPackages();
 
-        \Log::info('========== Plugin Loading Completed ==========', [
+        \Log::debug('========== Plugin Loading Completed ==========', [
             'loaded_count' => count($this->plugins)
         ]);
     }
@@ -81,16 +81,16 @@ class PluginManager
         try {
             $configPlugins = config('app-plugins', []);
             if (empty($configPlugins)) {
-                \Log::info('No plugins configured in config/app-plugins.php');
+                \Log::debug('No plugins configured in config/app-plugins.php');
                 return;
             }
 
-            \Log::info('Loading plugins from config/app-plugins.php', [
+            \Log::debug('Loading plugins from config/app-plugins.php', [
                 'count' => count($configPlugins)
             ]);
 
             foreach ($configPlugins as $packageName => $pluginClass) {
-                \Log::info("Loading plugin from config: {$packageName}");
+                \Log::debug("Loading plugin from config: {$packageName}");
                 if (!isset($this->plugins[$packageName])) {
                     $this->registerPlugin($packageName, $pluginClass);
                 } else {
@@ -113,7 +113,7 @@ class PluginManager
             return;
         }
 
-        \Log::info('Auto-discovering plugins from installed packages');
+        \Log::debug('Auto-discovering plugins from installed packages');
 
         try {
             foreach ($this->installedPackages as $package) {
@@ -138,7 +138,7 @@ class PluginManager
             return;
         }
 
-        \Log::info('Scanning local packages directory: ' . $this->packagesPath);
+        \Log::debug('Scanning local packages directory: ' . $this->packagesPath);
 
         try {
             // 限制只扫描两层目录，寻找包含 composer.json 的目录
@@ -226,12 +226,12 @@ class PluginManager
      */
     protected function discoverPluginInLocalPackage(string $packageName, string $packagePath, array $composer): void
     {
-        \Log::info("Checking local package: {$packageName}");
+        \Log::debug("Checking local package: {$packageName}");
 
         // 方式 1：检查 composer.json 中的 plugin 配置
         $pluginClass = Arr::get($composer, 'extra.plugin.class') ?? null;
         if ($pluginClass) {
-            \Log::info("Found explicit plugin in local package {$packageName}: {$pluginClass}");
+            \Log::debug("Found explicit plugin in local package {$packageName}: {$pluginClass}");
             $this->registerPlugin($packageName, $pluginClass);
             return;
         }
@@ -247,7 +247,7 @@ class PluginManager
 
             // 检查推断的类名是否实现了 PluginInterface
             if (class_exists($pluginClassGuess) && is_subclass_of($pluginClassGuess, PluginInterface::class)) {
-                \Log::info("Found inferred plugin in local package {$packageName}: {$pluginClassGuess}");
+                \Log::debug("Found inferred plugin in local package {$packageName}: {$pluginClassGuess}");
                 $this->registerPlugin($packageName, $pluginClassGuess);
                 return;
             }
@@ -274,7 +274,7 @@ class PluginManager
             return;
         }
 
-        \Log::info("Auto-discovered plugin from vendor: {$packageName}");
+        \Log::debug("Auto-discovered plugin from vendor: {$packageName}");
         $this->registerPlugin($packageName, $pluginClass);
     }
 
@@ -302,13 +302,13 @@ class PluginManager
             }
 
             if (!$plugin->isEnabled()) {
-                \Log::info("Plugin is disabled: {$packageName}");
+                \Log::debug("Plugin is disabled: {$packageName}");
                 return;
             }
 
             $this->plugins[$packageName] = $plugin;
 
-            \Log::info("✓ Plugin registered", [
+            \Log::debug("✓ Plugin registered", [
                 'package' => $packageName,
                 'class' => $pluginClass,
                 'name' => method_exists($plugin, 'getName') ? $plugin->getName() : $packageName,
@@ -329,7 +329,7 @@ class PluginManager
      */
     public function bootPlugins(): void
     {
-        \Log::info('========== Booting Plugins ==========');
+        \Log::debug('========== Booting Plugins ==========');
         foreach ($this->plugins as $name => $plugin) {
             try {
                 $plugin->register();
@@ -337,7 +337,7 @@ class PluginManager
                 \Log::error("Error booting plugin {$name}: " . $e->getMessage());
             }
         }
-        \Log::info('========== Booting Completed ==========');
+        \Log::debug('========== Booting Completed ==========');
     }
 
     /**
@@ -345,16 +345,16 @@ class PluginManager
      */
     public function registerRoutes(): void
     {
-        \Log::info('========== Registering Routes ==========');
+        \Log::debug('========== Registering Routes ==========');
         foreach ($this->plugins as $name => $plugin) {
             try {
                 $plugin->registerRoutes();
-                \Log::info("✓ Routes registered for: {$name}");
+                \Log::debug("✓ Routes registered for: {$name}");
             } catch (Exception $e) {
                 \Log::error("Error registering routes for {$name}: " . $e->getMessage());
             }
         }
-        \Log::info('========== Routes Registration Completed ==========');
+        \Log::debug('========== Routes Registration Completed ==========');
     }
 
     /**
@@ -405,7 +405,7 @@ class PluginManager
      */
     public function publishAssets(): void
     {
-        \Log::info('========== Publishing Plugin Assets ==========');
+        \Log::debug('========== Publishing Plugin Assets ==========');
         foreach ($this->plugins as $name => $plugin) {
             try {
                 $this->publishPluginAssets($name, $plugin);
@@ -413,7 +413,7 @@ class PluginManager
                 \Log::error("Error publishing assets for plugin {$name}: " . $e->getMessage());
             }
         }
-        \Log::info('========== Publishing Assets Completed ==========');
+        \Log::debug('========== Publishing Assets Completed ==========');
     }
 
     /**
@@ -422,12 +422,12 @@ class PluginManager
     protected function publishPluginAssets(string $name, PluginInterface $plugin): void
     {
         $basePath = $plugin->getBasePath();
-        \Log::info("Publishing assets for plugin: {$name}");
+        \Log::debug("Publishing assets for plugin: {$name}");
         $this->publishMigrations($name, $basePath);
         $this->publishConfig($name, $basePath);
         $this->publishViews($name, $basePath);
         $this->publishResources($name, $basePath);
-        \Log::info("✓ Assets published for plugin: {$name}");
+        \Log::debug("✓ Assets published for plugin: {$name}");
     }
 
     /**
@@ -449,7 +449,7 @@ class PluginManager
 
                 if (!File::exists($destination)) {
                     File::copy($source, $destination);
-                    \Log::info("Published migration: {$filename}");
+                    \Log::debug("Published migration: {$filename}");
                 }
             }
         } catch (Exception $e) {
@@ -479,7 +479,7 @@ class PluginManager
 
             if (!File::exists($destination)) {
                 File::copy($configFile, $destination);
-                \Log::info("Published config: {$pluginConfigName}.php");
+                \Log::debug("Published config: {$pluginConfigName}.php");
             }
         } catch (Exception $e) {
             \Log::warning("Error publishing config for {$name}: " . $e->getMessage());
@@ -502,7 +502,7 @@ class PluginManager
                 File::makeDirectory($destination, 0755, true);
             }
             File::copyDirectory($viewsPath, $destination);
-            \Log::info("Published views to: plugins/{$pluginName}");
+            \Log::debug("Published views to: plugins/{$pluginName}");
         } catch (Exception $e) {
             \Log::warning("Error publishing views for {$name}: " . $e->getMessage());
         }
@@ -524,7 +524,7 @@ class PluginManager
                 File::makeDirectory($destination, 0755, true);
             }
             File::copyDirectory($assetsPath, $destination);
-            \Log::info("Published resources to: /plugins/{$pluginName}");
+            \Log::debug("Published resources to: /plugins/{$pluginName}");
         } catch (Exception $e) {
             \Log::warning("Error publishing resources for {$name}: " . $e->getMessage());
         }

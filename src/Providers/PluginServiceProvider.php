@@ -19,19 +19,19 @@ class PluginServiceProvider extends ServiceProvider
    */
   public function register(): void
   {
-    \Log::info('========== PluginServiceProvider::register() ==========');
+    \Log::debug('========== PluginServiceProvider::register() ==========');
 
     try {
       // 注册插件管理器为单例，但不在这里加载插件
       $this->app->singleton(PluginManager::class, function ($app) {
-        \Log::info('Creating PluginManager singleton');
+        \Log::debug('Creating PluginManager singleton');
         return new PluginManager();
       });
 
       // 也可以使用短名称访问
       $this->app->alias(PluginManager::class, 'plugin-manager');
 
-      \Log::info('PluginManager singleton registered');
+      \Log::debug('PluginManager singleton registered');
     } catch (\Exception $e) {
       \Log::error('Error in PluginServiceProvider::register(): ' . $e->getMessage(), [
         'file' => $e->getFile(),
@@ -46,27 +46,27 @@ class PluginServiceProvider extends ServiceProvider
    */
   public function boot(): void
   {
-    \Log::info('========== PluginServiceProvider::boot() ==========');
+    \Log::debug('========== PluginServiceProvider::boot() ==========');
 
     try {
       $manager = $this->app->make(PluginManager::class);
 
       // 加载插件 - 在 boot 阶段，autoloader 已经完全初始化
-      \Log::info('Loading plugins...');
+      \Log::debug('Loading plugins...');
       $manager->loadPlugins();
 
       $pluginCount = count($manager->getPlugins());
-      \Log::info("Loaded {$pluginCount} plugins");
+      \Log::debug("Loaded {$pluginCount} plugins");
 
       // 启动所有插件
-      \Log::info('Booting plugins...');
+      \Log::debug('Booting plugins...');
       $manager->bootPlugins();
 
       // 注册路由
-      \Log::info('Registering plugin routes...');
+      \Log::debug('Registering plugin routes...');
       $manager->registerRoutes();
 
-      \Log::info('All plugin routes registered');
+      \Log::debug('All plugin routes registered');
 
       // 注册 Artisan 命令 - 不需要发布，直接生效
       $this->registerCommands();
@@ -74,9 +74,9 @@ class PluginServiceProvider extends ServiceProvider
       // 发布资源 - 只在运行 console 命令时
       if ($this->app->runningInConsole()) {
         try {
-          \Log::info('Publishing plugin assets...');
+          \Log::debug('Publishing plugin assets...');
           $manager->publishAssets();
-          \Log::info('Plugin assets published');
+          \Log::debug('Plugin assets published');
         } catch (\Exception $e) {
           \Log::warning('Error publishing assets: ' . $e->getMessage());
         }
@@ -91,7 +91,7 @@ class PluginServiceProvider extends ServiceProvider
 
     $this->publishConfig();
 
-    \Log::info('========== PluginServiceProvider::boot() Completed ==========');
+    \Log::debug('========== PluginServiceProvider::boot() Completed ==========');
   }
 
   /**
