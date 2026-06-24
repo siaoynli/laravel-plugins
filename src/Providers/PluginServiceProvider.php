@@ -34,7 +34,7 @@ class PluginServiceProvider extends ServiceProvider
 
         // 绑定单例
         $this->app->singleton(PluginManifest::class, function ($app) {
-            $path = config('plugins.cache.path', $app->bootstrapPath('cache/plugins.php'));
+            $path = config('plugins.cache.path') ?? $app->bootstrapPath('cache/plugins.php');
             return new PluginManifest($path);
         });
 
